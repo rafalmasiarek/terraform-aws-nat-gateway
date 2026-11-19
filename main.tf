@@ -18,19 +18,6 @@ locals {
   )
 
   _eip_targets = { for k, v in var.nat_gateways : k => v if v.connectivity_type == "public" && v.allocation_id == null }
-
-  # CloudWatch alarm_name must be unique per account+region - a bare
-  # nat_gateways key (e.g. "a") carries no such guarantee across separate
-  # deployments of this module. module.tagger[...].computed_name already is
-  # unique (namespace/environment-aware), so alarm names are built from it
-  # whenever tagging is on. With use_tagger = false there is no other
-  # uniqueness source available, so the key is used as-is and the caller
-  # becomes responsible for keeping nat_gateways keys unique across their
-  # whole account/region.
-  _alarm_name_prefix = {
-    for k in keys(var.nat_gateways) :
-    k => var.use_tagger ? module.tagger["nat-${k}"].computed_name : k
-  }
 }
 
 resource "aws_eip" "this" {
@@ -63,54 +50,58 @@ locals {
 # AWS's own "Recommended Alarms" for AWS/NATGateway - detects the NAT gateway
 # failing to allocate a source port for a new connection (too many concurrent
 # connections to one popular destination).
-resource "aws_cloudwatch_metric_alarm" "error_port_allocation" {
+module "error_port_allocation" {
   for_each = local._error_port_allocation_targets
+  source   = "rafalmasiarek/cloudwatch/aws//modules/metric-alarm"
+  version  = ">= 0.1.0"
 
-  alarm_name          = "${local._alarm_name_prefix[each.key]}-nat-error-port-allocation"
+  name                = "${each.key}-nat-error-port-allocation"
   alarm_description   = "NAT gateway ${each.key} could not allocate a source port for a new connection."
   comparison_operator = "GreaterThanThreshold"
+  threshold           = 0
   evaluation_periods  = var.alarms.error_port_allocation.evaluation_periods
   datapoints_to_alarm = var.alarms.error_port_allocation.datapoints_to_alarm
-  metric_name         = "ErrorPortAllocation"
-  namespace           = "AWS/NATGateway"
-  period              = var.alarms.error_port_allocation.period_seconds
-  statistic           = "Sum"
-  threshold           = 0
+  period_seconds      = var.alarms.error_port_allocation.period_seconds
+  alarm_actions       = var.alarms.error_port_allocation.alarm_actions
+  ok_actions          = var.alarms.error_port_allocation.ok_actions
 
-  dimensions = {
-    NatGatewayId = aws_nat_gateway.this[each.key].id
-  }
+  metrics = [{
+    namespace   = "AWS/NATGateway"
+    metric_name = "ErrorPortAllocation"
+    dimensions  = { NatGatewayId = aws_nat_gateway.this[each.key].id }
+  }]
 
-  alarm_actions = var.alarms.error_port_allocation.alarm_actions
-  ok_actions    = var.alarms.error_port_allocation.ok_actions
-
-  tags = local.tagger_tags["nat-${each.key}"]
+  use_tagger     = var.use_tagger
+  tagger_context = var.tagger_context
+  tags           = var.tags
 }
 
 # AWS's own "Recommended Alarms" for AWS/NATGateway - detects the NAT gateway
 # dropping packets (it processes up to 10M packets/sec; beyond that it drops).
-resource "aws_cloudwatch_metric_alarm" "packets_drop" {
+module "packets_drop" {
   for_each = local._packets_drop_targets
+  source   = "rafalmasiarek/cloudwatch/aws//modules/metric-alarm"
+  version  = ">= 0.1.0"
 
-  alarm_name          = "${local._alarm_name_prefix[each.key]}-nat-packets-drop"
+  name                = "${each.key}-nat-packets-drop"
   alarm_description   = "NAT gateway ${each.key} is dropping packets."
   comparison_operator = "GreaterThanThreshold"
+  threshold           = var.alarms.packets_drop.threshold
   evaluation_periods  = var.alarms.packets_drop.evaluation_periods
   datapoints_to_alarm = var.alarms.packets_drop.datapoints_to_alarm
-  metric_name         = "PacketsDropCount"
-  namespace           = "AWS/NATGateway"
-  period              = var.alarms.packets_drop.period_seconds
-  statistic           = "Sum"
-  threshold           = var.alarms.packets_drop.threshold
+  period_seconds      = var.alarms.packets_drop.period_seconds
+  alarm_actions       = var.alarms.packets_drop.alarm_actions
+  ok_actions          = var.alarms.packets_drop.ok_actions
 
-  dimensions = {
-    NatGatewayId = aws_nat_gateway.this[each.key].id
-  }
+  metrics = [{
+    namespace   = "AWS/NATGateway"
+    metric_name = "PacketsDropCount"
+    dimensions  = { NatGatewayId = aws_nat_gateway.this[each.key].id }
+  }]
 
-  alarm_actions = var.alarms.packets_drop.alarm_actions
-  ok_actions    = var.alarms.packets_drop.ok_actions
-
-  tags = local.tagger_tags["nat-${each.key}"]
+  use_tagger     = var.use_tagger
+  tagger_context = var.tagger_context
+  tags           = var.tags
 }
 
 # Not an AWS-recommended alarm - this module's own addition. Estimates
@@ -118,55 +109,46 @@ resource "aws_cloudwatch_metric_alarm" "packets_drop" {
 # (5 Gbps baseline, auto-scales to bandwidth_limit_gbps) from
 # BytesInFromSource + BytesInFromDestination, a CloudWatch-derived estimate,
 # not AWS's internal bandwidth accounting.
-resource "aws_cloudwatch_metric_alarm" "bandwidth_utilization" {
+module "bandwidth_utilization" {
   for_each = local._bandwidth_targets
+  source   = "rafalmasiarek/cloudwatch/aws//modules/metric-alarm"
+  version  = ">= 0.1.0"
 
-  alarm_name          = "${local._alarm_name_prefix[each.key]}-nat-bandwidth-utilization"
+  name                = "${each.key}-nat-bandwidth-utilization"
   alarm_description   = "NAT gateway ${each.key} estimated bandwidth utilization is above ${var.alarms.bandwidth_utilization.threshold_percent}% of its ${var.alarms.bandwidth_utilization.bandwidth_limit_gbps} Gbps ceiling."
   comparison_operator = "GreaterThanThreshold"
+  threshold           = var.alarms.bandwidth_utilization.threshold_percent
   evaluation_periods  = var.alarms.bandwidth_utilization.evaluation_periods
   datapoints_to_alarm = var.alarms.bandwidth_utilization.datapoints_to_alarm
-  threshold           = var.alarms.bandwidth_utilization.threshold_percent
+  period_seconds      = var.alarms.bandwidth_utilization.period_seconds
+  alarm_actions       = var.alarms.bandwidth_utilization.alarm_actions
+  ok_actions          = var.alarms.bandwidth_utilization.ok_actions
 
-  metric_query {
-    id          = "bytes_in_source"
-    return_data = false
-    metric {
+  metrics = [
+    {
+      id          = "bytes_in_source"
       namespace   = "AWS/NATGateway"
       metric_name = "BytesInFromSource"
-      period      = var.alarms.bandwidth_utilization.period_seconds
-      stat        = "Sum"
-      dimensions = {
-        NatGatewayId = aws_nat_gateway.this[each.key].id
-      }
-    }
-  }
-
-  metric_query {
-    id          = "bytes_in_dest"
-    return_data = false
-    metric {
+      dimensions  = { NatGatewayId = aws_nat_gateway.this[each.key].id }
+      return_data = false
+    },
+    {
+      id          = "bytes_in_dest"
       namespace   = "AWS/NATGateway"
       metric_name = "BytesInFromDestination"
-      period      = var.alarms.bandwidth_utilization.period_seconds
-      stat        = "Sum"
-      dimensions = {
-        NatGatewayId = aws_nat_gateway.this[each.key].id
-      }
-    }
-  }
+      dimensions  = { NatGatewayId = aws_nat_gateway.this[each.key].id }
+      return_data = false
+    },
+    {
+      id          = "utilization_pct"
+      expression  = "(bytes_in_source + bytes_in_dest) * 8 / ${var.alarms.bandwidth_utilization.period_seconds} / (${var.alarms.bandwidth_utilization.bandwidth_limit_gbps} * 1000000000) * 100"
+      return_data = true
+    },
+  ]
 
-  metric_query {
-    id          = "utilization_pct"
-    label       = "Estimated bandwidth utilization (%)"
-    return_data = true
-    expression  = "(bytes_in_source + bytes_in_dest) * 8 / ${var.alarms.bandwidth_utilization.period_seconds} / (${var.alarms.bandwidth_utilization.bandwidth_limit_gbps} * 1000000000) * 100"
-  }
-
-  alarm_actions = var.alarms.bandwidth_utilization.alarm_actions
-  ok_actions    = var.alarms.bandwidth_utilization.ok_actions
-
-  tags = local.tagger_tags["nat-${each.key}"]
+  use_tagger     = var.use_tagger
+  tagger_context = var.tagger_context
+  tags           = var.tags
 }
 
 # Not an AWS-recommended alarm - this module's own addition. Projects a
@@ -180,60 +162,49 @@ resource "aws_cloudwatch_metric_alarm" "bandwidth_utilization" {
 # Compared against a caller-supplied monthly budget (scaled down to
 # whatever period this alarm actually evaluates over). This is a
 # CloudWatch-derived estimate, not the authoritative AWS billing meter - it
-# can differ from your actual bill.
-resource "aws_cloudwatch_metric_alarm" "estimated_data_processing_cost" {
+# can differ from your actual bill. A private NAT gateway never reaches the
+# internet, so the data-transfer-out term is zeroed here per entry rather
+# than left for the caller to remember for every private one.
+module "estimated_data_processing_cost" {
   for_each = local._cost_targets
+  source   = "rafalmasiarek/cloudwatch/aws//modules/metric-alarm"
+  version  = ">= 0.1.0"
 
-  alarm_name          = "${local._alarm_name_prefix[each.key]}-nat-estimated-data-processing-cost"
+  name                = "${each.key}-nat-estimated-data-processing-cost"
   alarm_description   = "NAT gateway ${each.key} estimated data-processing cost is on pace to exceed its $${var.alarms.estimated_data_processing_cost.monthly_budget_usd}/month budget."
   comparison_operator = "GreaterThanThreshold"
+  threshold           = var.alarms.estimated_data_processing_cost.monthly_budget_usd * var.alarms.estimated_data_processing_cost.period_seconds / (30 * 24 * 3600)
   evaluation_periods  = var.alarms.estimated_data_processing_cost.evaluation_periods
   datapoints_to_alarm = var.alarms.estimated_data_processing_cost.datapoints_to_alarm
-  threshold           = var.alarms.estimated_data_processing_cost.monthly_budget_usd * var.alarms.estimated_data_processing_cost.period_seconds / (30 * 24 * 3600)
+  period_seconds      = var.alarms.estimated_data_processing_cost.period_seconds
+  alarm_actions       = var.alarms.estimated_data_processing_cost.alarm_actions
+  ok_actions          = var.alarms.estimated_data_processing_cost.ok_actions
 
-  metric_query {
-    id          = "egress_bytes"
-    return_data = false
-    metric {
+  metrics = [
+    {
+      id          = "egress_bytes"
       namespace   = "AWS/NATGateway"
       metric_name = "BytesInFromSource"
-      period      = var.alarms.estimated_data_processing_cost.period_seconds
-      stat        = "Sum"
-      dimensions = {
-        NatGatewayId = aws_nat_gateway.this[each.key].id
-      }
-    }
-  }
-
-  metric_query {
-    id          = "ingress_bytes"
-    return_data = false
-    metric {
+      dimensions  = { NatGatewayId = aws_nat_gateway.this[each.key].id }
+      return_data = false
+    },
+    {
+      id          = "ingress_bytes"
       namespace   = "AWS/NATGateway"
       metric_name = "BytesInFromDestination"
-      period      = var.alarms.estimated_data_processing_cost.period_seconds
-      stat        = "Sum"
-      dimensions = {
-        NatGatewayId = aws_nat_gateway.this[each.key].id
-      }
-    }
-  }
+      dimensions  = { NatGatewayId = aws_nat_gateway.this[each.key].id }
+      return_data = false
+    },
+    {
+      id          = "estimated_cost_usd"
+      expression  = "(egress_bytes + ingress_bytes) / 1073741824 * ${var.alarms.estimated_data_processing_cost.price_per_gb_processed} + egress_bytes / 1073741824 * ${each.value.connectivity_type == "public" ? var.alarms.estimated_data_processing_cost.price_per_gb_data_transfer_out : 0}"
+      return_data = true
+    },
+  ]
 
-  metric_query {
-    id          = "estimated_cost_usd"
-    label       = "Estimated data-processing + data-transfer-out cost for this period (USD)"
-    return_data = true
-    # A private NAT gateway never reaches the internet (VPC/on-prem only),
-    # so the data-transfer-out term never applies to it regardless of what
-    # the caller set - zeroed here per entry, not left for the caller to
-    # remember for every private one.
-    expression = "(egress_bytes + ingress_bytes) / 1073741824 * ${var.alarms.estimated_data_processing_cost.price_per_gb_processed} + egress_bytes / 1073741824 * ${each.value.connectivity_type == "public" ? var.alarms.estimated_data_processing_cost.price_per_gb_data_transfer_out : 0}"
-  }
-
-  alarm_actions = var.alarms.estimated_data_processing_cost.alarm_actions
-  ok_actions    = var.alarms.estimated_data_processing_cost.ok_actions
-
-  tags = local.tagger_tags["nat-${each.key}"]
+  use_tagger     = var.use_tagger
+  tagger_context = var.tagger_context
+  tags           = var.tags
 }
 
 locals {
