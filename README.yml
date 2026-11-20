@@ -1,0 +1,23 @@
+name: terraform-aws-nat-gateway
+repo_url: https://github.com/rafalmasiarek/terraform-aws-nat-gateway
+license: MIT
+
+context:
+  - "## About"
+  - |
+    Terraform module for one or more `aws_nat_gateway` resources (one per entry
+    in `nat_gateways`, typically one per Availability Zone for HA egress), each
+    with its own `aws_eip` unless you bring your own allocation. It never
+    creates the VPC, the subnets, or any route table entry pointing at it -
+    those belong to [terraform-aws-vpc](https://github.com/rafalmasiarek/terraform-aws-vpc)
+    and [terraform-aws-subnets](https://github.com/rafalmasiarek/terraform-aws-subnets).
+
+includes:
+  - docs/usage.md
+  - docs/terraform.md
+
+authors:
+  - name: Rafał Masiarek
+    email: rafal@masiarek.pl
+    github: rafalmasiarek
+    website: https://masiarek.pl
